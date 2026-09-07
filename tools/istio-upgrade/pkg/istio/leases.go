@@ -28,10 +28,10 @@ var gatewayRevisionLeasePattern = regexp.MustCompile(
 	`^istio-gateway-(?:deployment|status-leader)-(asm-\d+-\d+)$`,
 )
 
-// ReconcileRetiredGatewayLeases removes AKS-managed Istio gateway
+// ReconcileOrphanedGatewayLeases removes AKS-managed Istio gateway
 // leader-election leases only when their revision is no longer installed.
 // The caller is responsible for confirming the mesh is stable before invoking it.
-func ReconcileRetiredGatewayLeases(
+func ReconcileOrphanedGatewayLeases(
 	ctx context.Context,
 	logger logr.Logger,
 	kubeClient *KubeClient,
@@ -61,21 +61,24 @@ func ReconcileRetiredGatewayLeases(
 			continue
 		}
 
-		orphaned = append(orphaned, lease.Name)
 		if err := kubeClient.client.CoordinationV1().
 			Leases(istioSystemNamespace).
-			Delete(ctx, lease.Name, metav1.DeleteOptions{}); err != nil &&
-			!apierrors.IsNotFound(err) {
-			return fmt.Errorf(
-				"delete retired Istio gateway leader-election lease %q: %w",
-				lease.Name,
+			Delete(ctx, lease.Name, metav1.DeleteOptions{}); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			logger.Error(
 				err,
+				"Failed to delete orphaned Istio gateway leader-election lease (non-fatal)",
+				"lease", lease.Name,
 			)
+			continue
 		}
+		orphaned = append(orphaned, lease.Name)
 	}
 
 	if len(orphaned) > 0 {
-		logger.Info("Deleted orphaned Istio gateway leases", "count", len(orphaned), "leases", orphaned)
+		logger.Info("Removed orphaned Istio gateway leases", "count", len(orphaned), "leases", orphaned)
 	}
 
 	return nil

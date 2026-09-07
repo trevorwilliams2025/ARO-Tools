@@ -215,7 +215,8 @@ func runReconcile(ctx context.Context, logger logr.Logger, aksClient AKSClusterC
 	if err := ensureIngress(ctx, kubeClient, opts); err != nil {
 		logger.Error(err, "Failed to ensure ingress on reconcile (non-fatal)")
 	}
-	return reconcileRetiredGatewayLeases(ctx, logger, aksClient, kubeClient, opts, target)
+	reconcileOrphanedGatewayLeases(ctx, logger, aksClient, kubeClient, opts, target)
+	return nil
 }
 
 func runInitialInstall(ctx context.Context, logger logr.Logger, aksClient AKSClusterClient, kubeClient *KubeClient, opts UpgradeOptions, target string) error {
@@ -367,16 +368,7 @@ func runCleanupAndUpgrade(ctx context.Context, logger logr.Logger, aksClient AKS
 		return fmt.Errorf("cleanup verification failed: %v", verification.Issues)
 	}
 
-	if err := reconcileRetiredGatewayLeases(
-		ctx,
-		logger,
-		aksClient,
-		kubeClient,
-		opts,
-		oldRevision,
-	); err != nil {
-		return err
-	}
+	reconcileOrphanedGatewayLeases(ctx, logger, aksClient, kubeClient, opts, oldRevision)
 
 	// Phase 3: Start a fresh canary from old to target — this runs the full
 	// post-install flow with health checks, orphan guard, and auto-rollback.
@@ -530,16 +522,7 @@ func runCanaryPostInstall(ctx context.Context, logger logr.Logger, aksClient AKS
 		return fmt.Errorf("post-upgrade verification failed: %v", verification.Issues)
 	}
 
-	if err := reconcileRetiredGatewayLeases(
-		ctx,
-		logger,
-		aksClient,
-		kubeClient,
-		opts,
-		target,
-	); err != nil {
-		return err
-	}
+	reconcileOrphanedGatewayLeases(ctx, logger, aksClient, kubeClient, opts, target)
 
 	logger.Info("Istio upgrade complete and verified", "target", target)
 	return nil
@@ -668,22 +651,22 @@ func verifyControlPlaneAndTag(ctx context.Context, kubeClient *KubeClient, tag, 
 	return nil
 }
 
-func reconcileRetiredGatewayLeases(
+func reconcileOrphanedGatewayLeases(
 	ctx context.Context,
 	logger logr.Logger,
 	aksClient AKSClusterClient,
 	kubeClient *KubeClient,
 	opts UpgradeOptions,
 	target string,
-) error {
+) {
 	clusterInfo, meshProfile, err := aksClient.GetClusterState(
 		ctx,
 		opts.ResourceGroup,
 		opts.ClusterName,
 	)
 	if err != nil {
-		logger.Error(err, "Failed to get mesh state before retired lease reconciliation (non-fatal)")
-		return nil
+		logger.Error(err, "Failed to get mesh state before orphaned lease reconciliation (non-fatal)")
+		return
 	}
 
 	upgradeInfo, err := aksClient.GetMeshUpgradeTargets(
@@ -692,8 +675,8 @@ func reconcileRetiredGatewayLeases(
 		opts.ClusterName,
 	)
 	if err != nil {
-		logger.Error(err, "Failed to get Istio upgrade state before retired lease reconciliation (non-fatal)")
-		return nil
+		logger.Error(err, "Failed to get Istio upgrade state before orphaned lease reconciliation (non-fatal)")
+		return
 	}
 
 	// Do not touch leases while AKS is adding/removing revisions, or while
@@ -703,26 +686,24 @@ func reconcileRetiredGatewayLeases(
 		len(meshProfile.Revisions) != 1 ||
 		meshProfile.Revisions[0] != target {
 		logger.Info(
-			"Skipping retired Istio gateway lease reconciliation until mesh is stable",
+			"Skipping orphaned Istio gateway lease reconciliation until mesh is stable",
 			"provisioningState", clusterInfo.ProvisioningState,
 			"upgradeInProgress", upgradeInfo.UpgradeInProgress,
 			"installedRevisions", meshProfile.Revisions,
 			"target", target,
 		)
-		return nil
+		return
 	}
 
-	logger.Info("Reconciling retired Istio gateway leases")
-	if err := ReconcileRetiredGatewayLeases(
+	logger.Info("Reconciling orphaned Istio gateway leases")
+	if err := ReconcileOrphanedGatewayLeases(
 		ctx,
 		logger,
 		kubeClient,
 		meshProfile.Revisions,
 	); err != nil {
-		logger.Error(err, "Failed to reconcile retired Istio gateway leases (non-fatal)")
-		return nil
+		logger.Error(err, "Failed to reconcile orphaned Istio gateway leases (non-fatal)")
+		return
 	}
-	logger.Info("Retired Istio gateway leases reconciled")
-
-	return nil
+	logger.Info("Orphaned Istio gateway leases reconciled")
 }
