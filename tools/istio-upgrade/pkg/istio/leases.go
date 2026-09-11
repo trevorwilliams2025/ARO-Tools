@@ -31,6 +31,11 @@ var gatewayRevisionLeasePattern = regexp.MustCompile(
 // ReconcileOrphanedGatewayLeases removes AKS-managed Istio gateway
 // leader-election leases only when their revision is no longer installed.
 // The caller is responsible for confirming the mesh is stable before invoking it.
+//
+// Requires list/delete on coordination.k8s.io/leases in aks-istio-system; see
+// tools/istio-upgrade/cmd/run/cmd.go for RBAC (pipeline cluster-admin vs manual minimum).
+// Delete NotFound and other per-lease delete errors are non-fatal; list failure
+// returns an error to the caller (reconcileOrphanedGatewayLeases logs and skips).
 func ReconcileOrphanedGatewayLeases(
 	ctx context.Context,
 	logger logr.Logger,

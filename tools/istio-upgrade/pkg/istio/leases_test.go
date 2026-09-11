@@ -16,6 +16,7 @@ package istio
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -27,8 +28,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
+
+// Orphaned gateway lease cleanup is covered here and via reconcileOrphanedGatewayLeases
+// below.
 
 func gatewayLease(name string) *coordinationv1.Lease {
 	return &coordinationv1.Lease{
@@ -70,6 +76,74 @@ func TestReconcileOrphanedGatewayLeases(t *testing.T) {
 		_, err = client.CoordinationV1().Leases(istioSystemNamespace).Get(
 			context.Background(), "some-other-lease", metav1.GetOptions{})
 		require.NoError(t, err)
+	})
+
+	t.Run("list error is returned to caller", func(t *testing.T) {
+		client := fake.NewSimpleClientset(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: istioSystemNamespace}},
+		)
+		client.PrependReactor("list", "leases", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("apiserver unavailable")
+		})
+
+		err := ReconcileOrphanedGatewayLeases(
+			context.Background(),
+			logr.FromContextOrDiscard(context.Background()),
+			NewKubeClientFromInterface(client),
+			[]string{"asm-1-29"},
+		)
+		assert.ErrorContains(t, err, "list Istio gateway leader-election leases")
+		assert.ErrorContains(t, err, "apiserver unavailable")
+	})
+
+	t.Run("delete NotFound is ignored", func(t *testing.T) {
+		client := fake.NewSimpleClientset(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: istioSystemNamespace}},
+			gatewayLease("istio-gateway-deployment-asm-1-28"),
+		)
+		client.PrependReactor("delete", "leases", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			deleteAction := action.(k8stesting.DeleteAction)
+			return true, nil, apierrors.NewNotFound(coordinationv1.Resource("leases"), deleteAction.GetName())
+		})
+
+		err := ReconcileOrphanedGatewayLeases(
+			context.Background(),
+			logr.FromContextOrDiscard(context.Background()),
+			NewKubeClientFromInterface(client),
+			[]string{"asm-1-29"},
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("delete error is non-fatal and reconciliation continues", func(t *testing.T) {
+		client := fake.NewSimpleClientset(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: istioSystemNamespace}},
+			gatewayLease("istio-gateway-deployment-asm-1-28"),
+			gatewayLease("istio-gateway-status-leader-asm-1-28"),
+		)
+		client.PrependReactor("delete", "leases", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			deleteAction := action.(k8stesting.DeleteAction)
+			if deleteAction.GetName() == "istio-gateway-deployment-asm-1-28" {
+				return true, nil, fmt.Errorf("etcd connection refused")
+			}
+			return false, nil, nil
+		})
+
+		err := ReconcileOrphanedGatewayLeases(
+			context.Background(),
+			logr.FromContextOrDiscard(context.Background()),
+			NewKubeClientFromInterface(client),
+			[]string{"asm-1-29"},
+		)
+		require.NoError(t, err)
+
+		_, err = client.CoordinationV1().Leases(istioSystemNamespace).Get(
+			context.Background(), "istio-gateway-deployment-asm-1-28", metav1.GetOptions{})
+		require.NoError(t, err, "failed delete should leave lease in place")
+
+		_, err = client.CoordinationV1().Leases(istioSystemNamespace).Get(
+			context.Background(), "istio-gateway-status-leader-asm-1-28", metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err), "reconciliation should continue after non-fatal delete error")
 	})
 
 	t.Run("removes orphaned leases when mesh is stable", func(t *testing.T) {

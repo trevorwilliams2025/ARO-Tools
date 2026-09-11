@@ -23,7 +23,11 @@ import (
 //
 //	ARM: Contributor + Reader on subscription
 //	Kubernetes: cluster-admin equivalent (namespaces, configmaps, deployments,
-//	  statefulsets, daemonsets, pods, services, mutatingwebhookconfigurations)
+//	  statefulsets, daemonsets, pods, services, mutatingwebhookconfigurations,
+//	  leases in coordination.k8s.io for orphaned gateway leader-election cleanup)
+//
+// Production runs via the ARO-HCP istio-upgrade pipeline step receive cluster-admin
+// (EnsureClusterAdmin). The resource list above is the manual-run minimum.
 func NewCommand() (*cobra.Command, error) {
 	opts := DefaultOptions()
 	cmd := &cobra.Command{
